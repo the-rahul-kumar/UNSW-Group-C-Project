@@ -8,7 +8,13 @@ Created on Thu Mar  3 20:25:46 2022
 from datetime import datetime
 
 def calculate_month(x):
-    dt = datetime.strptime(x, "%d/%m/%Y %H:%M")
+    if '/' in x:
+        dt = datetime.strptime(x, "%d/%m/%Y %H:%M")
+    elif '-' in x:
+        dt = datetime.strptime(x, "%Y-%m-%d %H:%M:%S")
+    else:
+        dt = x
+        
     return dt
 
 def calculate_season(x):
