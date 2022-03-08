@@ -10,7 +10,7 @@ Complete the information below regarding your group.
 
 ### Group members and zIDs
 - Member 1 (zID1) - Group leader
-- Member 2 (zID2) - role
+- Rahul Kumar (5341134) - role
 - Member 3 (zID3) - role
 - Member 4 (zID4) - role
 - Member 5 (zID5) - role
