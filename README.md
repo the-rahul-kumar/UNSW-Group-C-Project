@@ -9,11 +9,11 @@ Complete the information below regarding your group.
 ## Group and project information
 
 ### Group members and zIDs
-- Member 1 (zID1) - Group leader
-- Rahul Kumar (5341134) - role
-- Member 3 (zID3) - role
-- Member 4 (zID4) - role
-- Member 5 (zID5) - role
+- Mathew Traini (z3121367) - Group leader, data analyst/report editor
+- Rahul Kumar (z5341134) - data analyst/data wrangler
+- Marie Patrice Santiago (z5294587) - project manager (PM)/data analyst
+- Paul Cronin (z5330951) - data analyst/video editor
+- Raphael Muema (z5318465) - data analyst/assistant PM
 
 ### Brief project description
 
