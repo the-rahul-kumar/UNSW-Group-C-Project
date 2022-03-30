@@ -1,0 +1,246 @@
+---
+title: "AEMO Forecast Accuracy Analysis"
+---
+
+# Libraries
+
+```{r include=FALSE}
+library(mgcv)
+library(pracma)
+library(ggplot2)
+library(dplyr)
+library(forecast)
+library(lubridate)
+library(lindia)
+require(gridExtra)
+library(zoo)
+```
+
+# AEMO forecast accuracy vs time
+
+```{r}
+modelAEMO <- function(combinedState, nameState){
+  forecastState <- combinedState[,5]
+  actualState <- combinedState[,7]
+  diffState <- forecastState -actualState
+  
+  # standard deviation of forecast error by week
+  weekState <- vector()
+  noDays <- as.integer(tail(combinedState$DATETIME,1)-
+                         head(combinedState$DATETIME,1))
+  noWeeks <- as.integer(noDays/7)
+  for (week in 1:noWeeks){
+    tweek    <- (week-1)*48*7+c(1:(48*7))
+    weekState[week] <- sd(diffState[tweek])
+  }
+  
+  startTime <- year(head(combinedState$DATETIME,1))
+  startTime <- startTime + (month(head(combinedState$DATETIME,1))-1)/12
+  startTime <- startTime + (day(head(combinedState$DATETIME,1))-1)/365
+
+  data <- ts(weekState,start = startTime, frequency = 52)
+  data %>% mstl() %>% 
+     autoplot(main=paste(nameState,"AEMO Forecast Accuracy Analysis"))
+}
+
+```
+
+# NSW data
+
+```{r}
+# NSW
+forecastNSW <- read.csv("state_data/NSW/forecastdemand_nsw.csv", header = TRUE)
+forecastNSW <- subset(forecastNSW, PERIODID=="1")
+forecastNSW$DATETIME <- as.POSIXct(forecastNSW$DATETIME, 
+                                   format="%Y-%m-%d %H:%M:%S")
+actualNSW <- read.csv("state_data/NSW/totaldemand_nsw.csv")
+actualNSW$DATETIME <- as.POSIXct(actualNSW$DATETIME, 
+                                 format="%d/%m/%Y %H:%M")
+temperNSW <- read.csv("state_data/NSW/temperature_nsw.csv")
+temperNSW$DATETIME <- as.POSIXct(temperNSW$DATETIME, 
+                                 format="%d/%m/%Y %H:%M")
+
+combinedNSW <- merge(x=forecastNSW,y=actualNSW,
+              by.x="DATETIME",by.y="DATETIME",
+              all = FALSE, sort = TRUE)
+combinedNSW <- merge(x=combinedNSW,y=temperNSW,
+              by.x="DATETIME",by.y="DATETIME",
+              all = FALSE, sort = TRUE)
+
+combinedNSW <- na.omit(combinedNSW)
+modelAEMO(combinedNSW,"NSW")
+
+```
+
+# Queensland data
+
+```{r}
+# QLD
+forecastQLD <- read.csv("state_data/QLD/forecastdemand_QLD.csv", 
+                        header = TRUE)
+forecastQLD <- subset(forecastQLD, PERIODID=="1")
+forecastQLD$DATETIME <- as.POSIXct(forecastQLD$DATETIME, 
+                                   format="%Y-%m-%d %H:%M:%S")
+actualQLD <- read.csv("state_data/QLD/totaldemand_QLD.csv")
+actualQLD$DATETIME <- as.POSIXct(actualQLD$DATETIME, 
+                                 format="%Y-%m-%d %H:%M:%S")
+
+temperQLD <- read.csv("state_data/QLD/temprature_QLD.csv")
+temperQLD$DATETIME <- as.POSIXct(temperQLD$DATETIME, 
+                                 format="%d/%m/%Y %H:%M")
+
+combinedQLD <- merge(x=forecastQLD,y=actualQLD,
+                     by.x="DATETIME",by.y="DATETIME",
+                     all = FALSE, sort = TRUE)
+
+combinedQLD <- merge(x=combinedQLD,y=temperQLD,
+              by.x="DATETIME",by.y="DATETIME",
+              all = FALSE, sort = TRUE)
+
+combinedQLD <- na.omit(combinedQLD)
+modelAEMO(combinedQLD,"QLD")
+
+```
+
+# South Australia data
+
+```{r}
+
+forecastSA <- read.csv("state_data/SA/forecastdemand_SA.csv", 
+                       header = TRUE)
+forecastSA <- subset(forecastSA, PERIODID=="1")
+forecastSA$DATETIME <- as.POSIXct(forecastSA$DATETIME, 
+                                  format="%Y-%m-%d %H:%M:%S")
+actualSA <- read.csv("state_data/SA/totaldemand_SA.csv")
+actualSA$DATETIME <- as.POSIXct(actualSA$DATETIME, 
+                                format="%Y-%m-%d %H:%M:%S")
+
+temperSA <- read.csv("state_data/SA/temprature_SA.csv")
+temperSA$DATETIME <- as.POSIXct(temperSA$DATETIME, 
+                                 format="%Y-%m-%d %H:%M:%S")
+
+combinedSA <- merge(x=forecastSA,y=actualSA,
+                     by.x="DATETIME",by.y="DATETIME",
+                     all = FALSE, sort = TRUE)
+
+combinedSA <- merge(x=combinedSA,y=temperSA,
+              by.x="DATETIME",by.y="DATETIME",
+              all = FALSE, sort = TRUE)
+
+combinedSA <- na.omit(combinedSA)
+modelAEMO(combinedSA,"SA")
+```
+
+# Victorian data
+
+```{r}
+forecastVIC <- read.csv("state_data/VIC/forecastdemand_VIC.csv", header = TRUE)
+forecastVIC <- subset(forecastVIC, PERIODID=="1")
+forecastVIC$DATETIME <- as.POSIXct(forecastVIC$DATETIME, format="%Y-%m-%d %H:%M:%S")
+actualVIC <- read.csv("state_data/VIC/totaldemand_VIC.csv")
+actualVIC$DATETIME <- as.POSIXct(actualVIC$DATETIME, format="%Y-%m-%d %H:%M:%S")
+
+temperVIC <- read.csv("state_data/VIC/temprature_VIC.csv")
+temperVIC$DATETIME <- as.POSIXct(temperVIC$DATETIME, 
+                                 format="%d/%m/%Y %H:%M")
+
+combinedVIC <- merge(x=forecastVIC,y=actualVIC,
+                     by.x="DATETIME",by.y="DATETIME",
+                     all = FALSE, sort = TRUE)
+
+combinedVIC <- merge(x=combinedVIC,y=temperVIC,
+              by.x="DATETIME",by.y="DATETIME",
+              all = FALSE, sort = TRUE)
+combinedVIC <- na.omit(combinedVIC)
+modelAEMO(combinedVIC,"VIC")
+```
+
+# Residual plot calculations
+
+```{r}
+fitNSW <- lm(tail(combinedNSW$FORECASTDEMAND,40000)~
+            tail(combinedNSW$TOTALDEMAND,40000))
+fitQLD <- lm(tail(combinedQLD$FORECASTDEMAND,40000)~
+            tail(combinedQLD$TOTALDEMAND,40000))
+fitSA <- lm(tail(combinedSA$FORECASTDEMAND,40000)~
+            tail(combinedSA$TOTALDEMAND,40000))
+fitVIC <- lm(tail(combinedVIC$FORECASTDEMAND,40000)~
+            tail(combinedVIC$TOTALDEMAND,40000))
+```
+
+# Temperature vs extremes plot
+
+```{r}
+combinedNSW$RESIDUALS <- combinedNSW$FORECASTDEMAND-
+  combinedNSW$TOTALDEMAND
+combinedQLD$RESIDUALS <- combinedQLD$FORECASTDEMAND-
+  combinedQLD$TOTALDEMAND
+combinedSA$RESIDUALS <- combinedSA$FORECASTDEMAND-
+  combinedSA$TOTALDEMAND
+combinedVIC$RESIDUALS <- combinedVIC$FORECASTDEMAND-
+  combinedVIC$TOTALDEMAND
+oNSW <-order(abs(combinedNSW$RESIDUALS))
+oQLD <-order(abs(combinedQLD$RESIDUALS))
+oSA <-order(abs(combinedSA$RESIDUALS))
+oVIC <-order(abs(combinedVIC$RESIDUALS))
+
+require(gridExtra)
+
+grid.arrange(ggplot(tail(combinedNSW[oNSW,],500), 
+       aes(x=TEMPERATURE, y=RESIDUALS))+geom_point()+
+         ggtitle("500 most extreme NSW residuals"),
+       ggplot(tail(combinedQLD[oQLD,],500), 
+       aes(x=TEMPERATURE, y=RESIDUALS))+geom_point()+
+         ggtitle("500 most extreme QLD residuals"),
+       ggplot(tail(combinedSA[oSA,],500), 
+       aes(x=TEMPERATURE, y=RESIDUALS))+geom_point()+
+         ggtitle("500 most extreme SA residuals"),
+       ggplot(tail(combinedVIC[oVIC,],500), 
+       aes(x=TEMPERATURE, y=RESIDUALS))+geom_point()+
+         ggtitle("500 most extreme VIC residuals"),
+       ncol=2)
+```
+
+
+
+# Histograms and standard deviations
+
+```{r}
+
+require(gridExtra)
+
+grid.arrange(gg_reshist(fitNSW, bins = 60)+
+               ggtitle(paste("NSW: SD=",
+               round(sd(fitNSW$residuals),2))),
+             gg_reshist(fitQLD, bins = 60)+
+               ggtitle(paste("QLD: SD=",
+               round(sd(fitQLD$residuals),2))),
+             gg_reshist(fitSA, bins = 60)+
+               ggtitle(paste("SA: SD=",
+               round(sd(fitSA$residuals),2))),
+             gg_reshist(fitVIC, bins = 60)+
+               ggtitle(paste("VIC: SD=",
+               round(sd(fitVIC$residuals),2))))
+
+```
+
+# Residuals vs Fitted
+
+```{r}
+
+grid.arrange(gg_resfitted(fitNSW)+
+               ggtitle(paste("NSW residuals vs fitted")),
+             gg_resfitted(fitQLD)+
+               ggtitle(paste("QLD residuals vs fitted")),
+             gg_resfitted(fitSA)+
+               ggtitle(paste("SA residuals vs fitted")),
+             gg_resfitted(fitVIC)+
+               ggtitle(paste("VIC residuals vs fitted")))
+
+
+#grid.arrange(dplotsNSW$"res_fitted", 
+#             dplotsQLD$"res_fitted",
+#             dplotsSA$"res_fitted",
+#             dplotsVIC$"res_fitted",
+#             ncol=2)
+```
