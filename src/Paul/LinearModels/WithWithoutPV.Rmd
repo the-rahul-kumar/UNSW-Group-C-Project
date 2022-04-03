@@ -1,0 +1,186 @@
+---
+title: "Linear Model Analysis"
+output: html_notebook
+---
+
+So our goal is to simply model the data, with and without the PV data.
+
+Libraries
+```{r}
+library(data.table)
+library(ggplot2)
+library(plotly)
+library(animation)
+library(lubridate)
+library(stats)
+library(beepr)
+```
+
+Functions
+```{r}
+# resamples and interpolates data at new time points
+resampleData <- function(x, y, newx){
+  fit <- approxfun(x,y, rule=2:2) # linear
+  resampled = fit(newx)
+  return (resampled)
+}
+
+# computes the MAPE
+mape <- function(real, pred){
+  return(100 * mean(abs((real - pred)/real)))
+}
+```
+
+Load the raw data
+```{r}
+tempNSW <- read.csv("state_data/NSW/temperature_nsw.csv")
+demandNSW <- read.csv("state_data/NSW/totaldemand_nsw.csv")
+pvdata <- read.csv("rooftop_pv_measurement_full_set.csv")
+pvNSW <- subset(pvdata, REGIONID=="NSW1")
+rm(pvdata)
+```
+
+Convert the dates to POSIXct
+```{r}
+tempNSW$DATETIME <- as.POSIXct(tempNSW$DATETIME, format="%d/%m/%Y %H:%M",tz = "Etc/GMT-10")
+demandNSW$DATETIME <- as.POSIXct(demandNSW$DATETIME, format="%d/%m/%Y %H:%M",tz = "Etc/GMT-10")
+pvNSW$INTERVAL_DATETIME <- as.POSIXct(pvNSW$INTERVAL_DATETIME, format="%Y-%m-%d %H:%M:%S",tz = "Etc/GMT-10")
+```
+
+Create categorical factors
+```{r}
+# public holidays categorical variable
+pub.hols <- tsibble::holiday_aus(2018:2022,state="NSW")
+pub.hols <- date(as.POSIXct(pub.hols$date, format="%Y-%M-%D",tz = "Etc/GMT-10"))
+
+# seasons categorical variable
+seasons <- rep(1,55)
+seasons[09:21] <- 2
+seasons[22:34] <- 3
+seasons[35:47] <- 4
+```
+
+Create data tables of GeneratedSupply and ActualDemand 
+```{r}
+# when to resample the data 
+st <- pvNSW$INTERVAL_DATETIME[30] # resample start time 
+ed <- demandNSW$DATETIME[196512] # resample end time
+sampleTimes <- seq(from=st, to=ed, by = "30 min") # sample times
+
+# this computes the GeneratedSupply data table for use in subsequent models
+genSupply <- data.table(DEMAND = resampleData(demandNSW$DATETIME, demandNSW$TOTALDEMAND, sampleTimes),
+                        DATE1 = (1:53136)-mean((1:53136)),
+                        DATE2 = (1:53136)^2-mean((1:53136)^2),
+                        DATE3 = (1:53136)^3-mean((1:53136)^3),
+                        TEMPERATURE1 = resampleData(tempNSW$DATETIME, tempNSW$TEMPERATURE,sampleTimes),
+                        TEMPERATURE2 = resampleData(tempNSW$DATETIME, tempNSW$TEMPERATURE,sampleTimes)^2,
+                        TEMPERATURE3 = resampleData(tempNSW$DATETIME, tempNSW$TEMPERATURE,sampleTimes)^3,
+                        dayindex = as.factor(rep(1:48,1107)),
+                        dayName = as.factor(strftime(sampleTimes,format = "%w")),
+                        season = as.factor(seasons[(1+as.integer(strftime(sampleTimes,format="%W")))]),
+#                        weekNum = as.factor(as.integer(strftime(sampleTimes,format="%W"))),
+                        pubHoliday = as.integer(date(sampleTimes) %in% (pub.hols)))
+
+
+
+# this computes the ActualDemand data table for use in subsequent models
+actDemand <- genSupply
+actDemand$DEMAND <- actDemand$DEMAND + resampleData(pvNSW$INTERVAL_DATETIME,pvNSW$POWER,sampleTimes)
+
+```
+
+Linear model
+```{r}
+genSupplyLM <- lm(DEMAND ~ 1 + ., data = genSupply)
+actDemandLM <- lm(DEMAND ~ 1 + ., data = actDemand)
+
+plot(sampleTimes[1000:1300],genSupply$DEMAND[1000:1300])
+lines(sampleTimes[1000:1300],genSupplyLM$fitted.values[1000:1300],col="red",lwd=1)
+summary(genSupplyLM)
+mape(genSupply$DEMAND , genSupplyLM$fitted.values)
+
+
+plot(sampleTimes[1000:1300],actDemand$DEMAND[1000:1300])
+lines(sampleTimes[1000:1300],actDemandLM$fitted.values[1000:1300],col="red",lwd=1)
+summary(actDemandLM)
+mape(actDemand$DEMAND,actDemandLM$fitted.values)
+
+```
+
+GLM models
+```{r}
+
+# WORKING - DONT DELETE
+#suppressWarnings(genSupplyGLM1 <- glm(DEMAND ~ DATE1 * TEMPERATURE2 *
+#                  dayindex * dayName + as.factor(pubHoliday) + season, 
+#                  family=poisson(), data=genSupply))  #saturated model
+
+suppressWarnings(
+  genSupplyGLM1 <- glm(DEMAND ~ 
+  TEMPERATURE2 *dayindex * dayName + as.factor(pubHoliday) + season, 
+  family=poisson(), data=genSupply))  #saturated model
+beep(3)
+
+plot(sampleTimes[1000:1300],genSupply$DEMAND[1000:1300])
+lines(sampleTimes[1000:1300],genSupplyGLM1$fitted.values[1000:1300],col="red",lwd=1)
+summary(genSupplyLM)
+mape(genSupply$DEMAND , genSupplyLM$fitted.values)
+
+suppressWarnings(
+  actDemandGLM1 <- glm(DEMAND ~ 
+  TEMPERATURE2 *dayindex * dayName + as.factor(pubHoliday) + season, 
+  family=poisson(), data=actDemand))  #saturated model
+beep(3)
+
+plot(sampleTimes[1000:1300],actDemand$DEMAND[1000:1300])
+lines(sampleTimes[1000:1300],actDemandGLM1$fitted.values[1000:1300],col="red",lwd=1)
+summary(actDemandLM)
+mape(actDemand$DEMAND , actDemandLM$fitted.values)
+
+
+
+
+#genSupplyGLM2 <- glm(frequency ~ site + type, family=poisson(), data=melanoma)  #model with no interaction
+#suppressWarnings(genSupplyGLM3 <- glm(DEMAND ~ 1, family=poisson(), data=genSupply))  #minimum model
+
+##actDemandLM <- lm(DEMAND ~ 1 + ., data = actDemand)
+#actDemandGLM1 <- glm(frequency ~ site*type, family=poisson(), data=melanoma)  #saturated model
+#actDemandGLM2 <- glm(frequency ~ site + type, family=poisson(), data=melanoma)  #model with no interaction
+#actDemandGLM3 <- glm(frequency ~ 1, family=poisson(), data=melanoma)  #minimum model
+
+
+```
+
+
+GAM model
+```{r}
+
+suppressWarnings(
+  genSupplyGAM1 <- mgcv::gam(
+  genSupply$DEMAND ~ s(genSupply$DATE1,genSupply$DATE2,
+  genSupply$TEMPERATURE1, genSupply$TEMPERATURE2, genSupply$TEMPERATURE3,
+  genSupply$pubHoliday,
+  k=1000) + genSupply$season + genSupply$dayindex + genSupply$dayName,
+  ))
+beep(3)
+
+plot(sampleTimes[1000:1300],genSupply$DEMAND[1000:1300])
+lines(sampleTimes[1000:1300],genSupplyGAM1$fitted.values[1000:1300],col="red",lwd=1)
+summary(genSupplyGAM1)
+mape(genSupply$DEMAND,genSupplyGAM1$fitted.values)
+
+suppressWarnings(
+  actDemandGAM1 <- mgcv::gam(
+  actDemand$DEMAND ~ s(actDemand$DATE1,actDemand$DATE2,
+  actDemand$TEMPERATURE1, actDemand$TEMPERATURE2, actDemand$TEMPERATURE3,
+  actDemand$pubHoliday,
+  k=1000) + actDemand$season + actDemand$dayindex + actDemand$dayName,
+  ))
+beep(3)
+
+plot(sampleTimes[1000:1300],actDemand$DEMAND[1000:1300])
+lines(sampleTimes[1000:1300],actDemandGAM1$fitted.values[1000:1300],col="red",lwd=1)
+mape(actDemand$DEMAND,actDemandGAM1$fitted.values)
+```
+
+
