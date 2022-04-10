@@ -1,0 +1,393 @@
+---
+title: "Linear Model Analysis"
+output: html_notebook
+---
+
+Our goal is to simply model the data, with and without the PV data.  To do this,
+I am using two models: a linear model (LM) and a generalised linear model (GLM).
+
+This code contains two main components for each - an EXPLANATORY model and a
+PREDICTIVE model (roll-forward).
+
+Libraries
+```{r include=FALSE}
+library(data.table)
+library(ggplot2)
+library(plotly)
+library(animation)
+library(lubridate)
+library(stats)
+library(beepr)
+library(datawizard)
+```
+
+Global variables
+```{r}
+startDT <- as.POSIXct("2018-03-07 00:00:00", format="%Y-%m-%d %H:%M:%S",tz = "Etc/GMT-10")
+stopDT  <- as.POSIXct("2021-01-31 23:30:00", format="%Y-%m-%d %H:%M:%S",tz = "Etc/GMT-10")
+sampleTimes <- seq(from=startDT, to=stopDT, by = "30 min") # 
+```
+
+Functions
+```{r}
+# resamples and interpolates data at new time points
+resampleData <- function(x, y, newx){
+  fit <- approxfun(x,y, rule = 2:2) # linear
+  resampled = fit(newx)
+  return(resampled)
+}
+
+# uniformly resamples a particular set of state data
+cleanState <- function(dataState){
+  newState <- data.table(
+    DATETIME = sampleTimes,
+    TOTALDEMAND = resampleData(dataState$DATETIME, dataState$TOTALDEMAND,sampleTimes),
+    POWER = resampleData(dataState$DATETIME, dataState$POWER,sampleTimes),
+    TEMPERATURE = resampleData(dataState$DATETIME, dataState$TEMPERATURE,sampleTimes))
+  return(newState)
+}
+
+# computes the MAPE
+mape <- function(real, pred){
+  return(100 * mean(abs((real - pred)/real)))
+}
+
+# plot the model over a particular range
+plotModel <- function(model, xrange, times){
+  ydata <- model$model$DEMAND
+  plot(times[xrange],ydata[xrange])
+  lines(times[xrange],model$fitted.values[xrange],col = "red",lwd=3)
+  mape(ydata , model$fitted.values)
+}
+
+# use a polynomial to predict ONE position further.
+polyPred <- function(data,k){
+  x <- seq(1:length(data))
+  model <- lm(data ~ poly(x,k))
+  xnew <- data.frame(x = (length(data)+1))
+  y <- predict(model, newdata=xnew)
+}
+
+```
+
+
+Load and clean the raw data
+```{r}
+allTheData <- read.csv("dataset_v1_0.csv")
+allTheData <- allTheData[complete.cases(allTheData), ]
+allTheData$DATETIME <- as.POSIXct(allTheData$DATETIME, format="%Y-%m-%d %H:%M:%S",tz = "Etc/GMT-10")
+allTheData <- subset(allTheData, DATETIME >= startDT)
+allTheData <- subset(allTheData, DATETIME < stopDT)
+
+toKeep <-c("DATETIME","TOTALDEMAND","POWER","TEMPERATURE")
+dataNSW <- subset(allTheData, STATE=="NSW")[toKeep]
+dataQLD <- subset(allTheData, STATE=="QLD")[toKeep]
+dataVIC <- subset(allTheData, STATE=="VIC")[toKeep]
+dataSA <- subset(allTheData, STATE=="SA")[toKeep]
+rm(allTheData)
+
+dataNSW <- cleanState(dataNSW)
+dataQLD <- cleanState(dataQLD)
+dataVIC <- cleanState(dataQLD)
+dataSA <- cleanState(dataSA)
+```
+
+Create categorical factors
+```{r}
+# public holidays categorical variable
+pub.hols.NSW <- tsibble::holiday_aus(2018:2022,state="NSW")
+pub.hols.QLD <- tsibble::holiday_aus(2018:2022,state="QLD")
+pub.hols.VIC <- tsibble::holiday_aus(2018:2022,state="VIC")
+pub.hols.SA <-  tsibble::holiday_aus(2018:2022,state="SA")
+
+pub.hols.NSW <- date(as.POSIXct(pub.hols.NSW$date, format="%Y-%M-%D",tz = "Etc/GMT-10"))
+pub.hols.QLD <- date(as.POSIXct(pub.hols.QLD$date, format="%Y-%M-%D",tz = "Etc/GMT-10"))
+pub.hols.VIC <- date(as.POSIXct(pub.hols.VIC$date, format="%Y-%M-%D",tz = "Etc/GMT-10"))
+pub.hols.SA  <- date(as.POSIXct(pub.hols.SA$date,  format="%Y-%M-%D",tz = "Etc/GMT-10"))
+
+# seasons categorical variable
+# summer = 1, autumn = 2, winter = 3, fall = 4
+# NOTE: this is NOT based on meterological seasons, but rather summer being the
+# hottest weeks and winter being the coldest weeks
+seasons <- rep(1,55)
+seasons[09:21] <- 2
+seasons[22:34] <- 3
+seasons[35:47] <- 4
+```
+
+Create Linear Model Data Table
+```{r}
+N <- 1488 # number of time slots in January 2021.
+L <- 49488 # length of the training set
+
+state = "NSW"
+if (state=="NSW"){
+  data <- dataNSW
+  pub.hols <- pub.hols.NSW
+}
+
+# create data table holding all the model data
+genSupply <- data.table(DEMAND = data$TOTALDEMAND,
+                        DATE1 = standardize(1:50976),
+                        DATE2 = standardize((1:50976))^2,
+                        DATE3 = standardize((1:50976))^3,
+                        TEMPERATURE1 = standardize(data$TEMPERATURE),
+                        TEMPERATURE2 = standardize(data$TEMPERATURE^2),
+                        TEMPERATURE3 = standardize(data$TEMPERATURE^3),
+                        dayindex = as.factor(rep(1:48,1062)),
+                        dayName = as.factor(strftime(sampleTimes,format = "%w")),
+                        season = as.factor(seasons[(1+as.integer(strftime(sampleTimes,format="%W")))]),
+#                        weekNum = as.factor(as.integer(strftime(sampleTimes,format="%W"))),
+                        pubHoliday = as.integer(date(sampleTimes) %in% (pub.hols)))
+actDemand <- genSupply
+actDemand$DEMAND <- actDemand$DEMAND + data$POWER
+
+#create emptly list to hold results for WITH and WITHOUT PV data
+genSupplyForecast <- rep(0,N) #results for not considering PV data
+actDemandForecast <- rep(0,N) #results for when considering PV data
+```
+
+
+Linear Model Exploration (X for exploratory)
+```{r}
+genSupplyX <- lm(log(DEMAND) ~ 1 + ., data = genSupply)
+summary(genSupplyX)
+# REMEMBER: when looking at these terms, they need to be considered in terms
+# of EXPONENTIAL values.
+```
+
+
+Linear Model (LM) Roll Forward Analysis
+```{r}
+# a short note
+# I used this same code to explore the optimal weights, the optimal polymer 
+# prediction function, and the optimal number of previous elements to use for
+# prediction.  Turns out, a linear model using the last 10 time slots.
+
+
+weights = rev(exp(-(0:(L-1))/64)) #compute weights - effectively only three days
+j=10
+for (i in 1:N){
+    # generate the LM for Generated Supply (does not consider PV data)
+    suppressWarnings(genSupplyLM <- lm(log(DEMAND) ~ 1 + ., data = genSupply[i:(i+L-1),], weights = weights))
+    genSupplyData <-genSupply[i+L,]
+    genSupplyData$DEMAND <-0 #this is to ensure that we simply don't copy the result
+    genSupplyData$TEMPERATURE1 <- polyPred(genSupply$TEMPERATURE1[(i+L-1-j):(i+L-1)],1)
+    genSupplyData$TEMPERATURE2 <- polyPred(genSupply$TEMPERATURE2[(i+L-1-j):(i+L-1)],1)
+    genSupplyData$TEMPERATURE3 <- polyPred(genSupply$TEMPERATURE3[(i+L-1-j):(i+L-1)],1)
+    suppressWarnings(genSupplyForecast[i] <- predict(genSupplyLM,newdata=genSupplyData))
+
+    suppressWarnings(actDemandLM <- lm(log(DEMAND) ~ 1 + ., 
+                                       data = actDemand[i:(i+L-1),],weights = weights))
+    actDemandData <-actDemand[i+L,]
+    actDemandData$DEMAND <-0 #this is to ensure that we simply don't copy the result
+    actDemandData$TEMPERATURE1 <- polyPred(actDemand$TEMPERATURE1[(i+L-1-j):(i+L-1)],1)
+    actDemandData$TEMPERATURE2 <- polyPred(actDemand$TEMPERATURE2[(i+L-1-j):(i+L-1)],1)
+    actDemandData$TEMPERATURE3 <- polyPred(actDemand$TEMPERATURE3[(i+L-1-j):(i+L-1)],1)
+    suppressWarnings(actDemandForecast[i] <- predict(actDemandLM,newdata=actDemandData))
+    if (!(i %% 10)){print(i)}
+}
+
+
+plot(sampleTimes[(1+L):(N+L)],data$TOTALDEMAND[(1+L):(N+L)],
+     main = "NSW: Generated Supply (no PV included)", xlab = "Date (2021)", ylab = "Power",
+     xlim = c(sampleTimes[L],sampleTimes[L+500]))
+lines(sampleTimes[(1+L):(N+L)],exp(genSupplyForecast[1:N]) ,
+      col='red', lwd=2)
+
+plot(sampleTimes[(1+L):(N+L)],data$TOTALDEMAND[(1+L):(N+L)],
+     main = "NSW: Actual Demand (with PV included)",xlab = "Date (2021)", ylab = "Power",
+    xlim = c(sampleTimes[L],sampleTimes[L+500]))
+lines(sampleTimes[(1+L):(N+L)],exp(actDemandForecast[1:N])-data$POWER[(L+1):(L+N)],
+      col='green', lwd=2)
+
+noPVoutput <- data.table(DATETIME = sampleTimes[(1+L):(N+L)], TOTALDEMAND = exp(genSupplyForecast[1:N]))
+withPVoutput <- data.table(DATETIME = sampleTimes[(1+L):(N+L)], TOTALDEMAND = exp(actDemandForecast[1:N])-data$POWER[(L+1):(L+N)])
+
+write.csv(noPVoutput, paste(state," - LM - without future info - without PV.csv"), row.names=FALSE)
+write.csv(withPVoutput, paste(state, " - LM - without future info - with PV.csv"), row.names=FALSE)
+
+print(mape(data$TOTALDEMAND[(1+L):(N+L)],exp(genSupplyForecast[1:N])))
+print(mape(data$TOTALDEMAND[(1+L):(N+L)] + data$POWER[(1+L):(N+L)],exp(actDemandForecast[1:N])))
+
+```
+
+
+
+Explore weights and prediction model
+Here, the variable 'j' can be used to explore the effects of weightings
+```{r}
+
+for (j in 4:9){
+  weights = rev(exp(-(0:(L-1))/64)) #compute
+#  weights = rev(exp(-(0:(L-1))/(2^j)) #compute
+
+  for (i in 1:N){
+    # generate the LM for Generated Supply (does not consider PV data)
+    suppressWarnings(genSupplyLM <- lm(log(DEMAND) ~ 1 + ., 
+                                       data = genSupply[i:(i+L-1),], weights = weights))
+    genSupplyData <-genSupply[i+L,]
+    genSupplyData$DEMAND <-0 #this is to ensure that we simply don't copy the result
+#    genSupplyData$TEMPERATURE1 <- polyPred(genSupply$TEMPERATURE1[(i+L-1-j):(i+L-1)],0)
+    genSupplyData$TEMPERATURE1 <- polyPred(genSupply$TEMPERATURE1[(i+L-1-10):(i+L-1)],1)
+    genSupplyData$TEMPERATURE2 <- polyPred(genSupply$TEMPERATURE2[(i+L-1-10):(i+L-1)],1)
+    genSupplyData$TEMPERATURE3 <- polyPred(genSupply$TEMPERATURE3[(i+L-1-10):(i+L-1)],1)
+    suppressWarnings(genSupplyForecast[i] <- predict(genSupplyLM,newdata=genSupplyData))
+
+    suppressWarnings(actDemandLM <- lm(log(DEMAND) ~ 1 + ., 
+                                       data = actDemand[i:(i+L-1),],weights = weights))
+    actDemandData <-actDemand[i+L,]
+    actDemandData$DEMAND <-0 #this is to ensure that we simply don't copy the result
+    actDemandData$TEMPERATURE1 <- mean(actDemand$TEMPERATURE1[(i+L-1-j):(i+L-1)])
+    actDemandData$TEMPERATURE2 <- mean(actDemand$TEMPERATURE2[(i+L-1-j):(i+L-1)])
+    actDemandData$TEMPERATURE3 <- mean(actDemand$TEMPERATURE3[(i+L-1-j):(i+L-1)])
+    suppressWarnings(actDemandForecast[i] <- predict(actDemandLM,newdata=actDemandData))
+  }
+  print(j)
+  print(mape(data$TOTALDEMAND[(1+L):(N+L)],exp(genSupplyForecast[1:N])))
+  print(mape(data$TOTALDEMAND[(1+L):(N+L)] + data$POWER[(1+L):(N+L)],exp(actDemandForecast[1:N])))
+}
+```
+
+
+GLM models
+```{r}
+N <- 1488
+L <- 49488 # length of the training set
+
+state = "NSW"
+if (state=="NSW"){
+  data <- dataNSW
+  pub.hols <- pub.hols.NSW
+}
+
+genSupplyForecast <- rep(0,N) #results for not considering PV data
+weights = rev(exp(-(0:(L-1))/640)) #compute
+j=10
+for (i in 1:N){
+  # generate the GLM for Generated Supply (does not consider PV data)
+#  genSupplyGLM <- glm(log(DEMAND) ~ ., data = genSupply[i:(i+L-1),], weights = weights)
+  genSupplyGLM <- glm(DEMAND ~
+    DATE1*(dayindex+dayName+season+pubHoliday)+
+    DATE2*(dayindex+dayName+season+pubHoliday)+
+    DATE3*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE1*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE2*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE3*(dayindex+dayName+season+pubHoliday),
+    data = genSupply[i:(i+L-1),], weights = weights)
+
+  genSupplyData <-genSupply[i+L,]
+  genSupplyData$DEMAND <-0 #this is to ensure that we simply don't copy the result
+  genSupplyData$TEMPERATURE1 <- polyPred(genSupply$TEMPERATURE1[(i+L-1-j):(i+L-1)],1)
+  genSupplyData$TEMPERATURE2 <- polyPred(genSupply$TEMPERATURE2[(i+L-1-j):(i+L-1)],1)
+  genSupplyData$TEMPERATURE3 <- polyPred(genSupply$TEMPERATURE3[(i+L-1-j):(i+L-1)],1)
+  genSupplyForecast[i] <- predict(genSupplyGLM,newdata=genSupplyData)
+
+#  actDemandGLM <- glm(log(DEMAND) ~ ., data = actDemand[i:(i+L-1),],weights = weights)
+  actDemandGLM <- glm(DEMAND ~
+    DATE1*(dayindex+dayName+season+pubHoliday)+
+    DATE2*(dayindex+dayName+season+pubHoliday)+
+    DATE3*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE1*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE2*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE3*(dayindex+dayName+season+pubHoliday),
+    data = actDemand[i:(i+L-1),], weights = weights)
+  
+  actDemandData <-actDemand[i+L,]
+  actDemandData$DEMAND <-0 #this is to ensure that we simply don't copy the result
+  actDemandData$TEMPERATURE1 <- polyPred(actDemand$TEMPERATURE1[(i+L-1-j):(i+L-1)],1)
+  actDemandData$TEMPERATURE2 <- polyPred(actDemand$TEMPERATURE2[(i+L-1-j):(i+L-1)],1)
+  actDemandData$TEMPERATURE3 <- polyPred(actDemand$TEMPERATURE3[(i+L-1-j):(i+L-1)],1)
+  actDemandForecast[i] <- predict(actDemandGLM,newdata=actDemandData)
+  print(i)
+}
+
+plot(sampleTimes[(1+L):(N+L)],data$TOTALDEMAND[(1+L):(N+L)],
+     main = "NSW: Generated Supply (no PV included)", xlab = "Date (2021)", ylab = "Power",
+     xlim = c(sampleTimes[L],sampleTimes[L+500]))
+lines(sampleTimes[(1+L):(N+L)],(genSupplyForecast[1:N]) ,
+      col='red', lwd=2)
+
+plot(sampleTimes[(1+L):(N+L)],data$TOTALDEMAND[(1+L):(N+L)],
+     main = "NSW: Actual Demand (with PV included)",xlab = "Date (2021)", ylab = "Power",
+    xlim = c(sampleTimes[L],sampleTimes[L+500]))
+lines(sampleTimes[(1+L):(N+L)],(actDemandForecast[1:N])-data$POWER[(L+1):(L+N)],
+      col='green', lwd=2)
+  
+noPVoutput <- data.table(DATETIME = sampleTimes[(1+L):(N+L)], TOTALDEMAND = (genSupplyForecast[1:N]))
+withPVoutput <- data.table(DATETIME = sampleTimes[(1+L):(N+L)], TOTALDEMAND = (actDemandForecast[1:N])-data$POWER[(L+1):(L+N)])
+
+write.csv(noPVoutput, paste(state," - GAM - without future info - without PV.csv"), row.names=FALSE)
+write.csv(withPVoutput, paste(state, " - GAM - without future info - with PV.csv"), row.names=FALSE)
+
+print(mape(data$TOTALDEMAND[(1+L):(N+L)],(genSupplyForecast[1:N])))
+print(mape(data$TOTALDEMAND[(1+L):(N+L)] + data$POWER[(1+L):(N+L)],(actDemandForecast[1:N])))
+```
+
+
+GAM model (UNFINISHED)
+```{r}
+
+
+  genSupplyGAM1 <- mgcv::gam(log(DEMAND) ~
+    s(DATE1,pubHoliday,k=100)+
+    s(DATE2,pubHoliday,k=100)+
+    s(DATE3,pubHoliday,k=100)+
+    s(TEMPERATURE1,pubHoliday,k=100)+
+    s(TEMPERATURE2,(pubHoliday),k=100) +
+    s(TEMPERATURE3,(pubHoliday),k=100) +
+    season +dayName+ dayindex ,
+    data = genSupply)
+beep(1)
+    
+
+   +
+    genSupply$season + genSupply$dayindex + genSupply$dayName
+
+
+  genSupplyGAM2 <- mgcv::gam(
+  genSupply$DEMAND ~ s(genSupply$DATE1,genSupply$DATE2,
+  genSupply$TEMPERATURE1, genSupply$TEMPERATURE2, genSupply$TEMPERATURE3,
+  genSupply$pubHoliday,
+  k=100) + genSupply$season + genSupply$dayindex + genSupply$dayName,
+  )
+
+  genSupplyGLM <- glm(DEMAND ~
+    DATE1*(dayindex+dayName+season+pubHoliday)+
+    DATE2*(dayindex+dayName+season+pubHoliday)+
+    DATE3*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE1*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE2*(dayindex+dayName+season+pubHoliday)+
+    TEMPERATURE3*(dayindex+dayName+season+pubHoliday),
+    data = genSupply[i:(i+L-1),], weights = weights)
+
+  plot(genSupply$DEMAND[1:200])
+lines(genSupplyGAM2$fitted.values[1:200])
+
+beep(3)
+
+suppressWarnings(
+  actDemandGAM1 <- mgcv::gam(
+  actDemand$DEMAND ~ s(actDemand$DATE1,actDemand$DATE2,
+  actDemand$TEMPERATURE1, actDemand$TEMPERATURE2, actDemand$TEMPERATURE3,
+  actDemand$pubHoliday,
+  k=1000) + actDemand$season + actDemand$dayindex + actDemand$dayName,
+  ))
+beep(3)
+
+plot(genSupply$DEMAND[1:200])
+plot(sampleTimes[(1+L):(N+L)],data$TOTALDEMAND[(1+L):(N+L)],
+     main = "NSW: Generated Supply (no PV included)", xlab = "Date (2021)", ylab = "Power",
+     xlim = c(sampleTimes[L],sampleTimes[L+500]))
+lines(sampleTimes[(1+L):(N+L)],(genSupplyForecast[1:N]) ,
+      col='red', lwd=2)
+
+plot(sampleTimes[(1+L):(N+L)],data$TOTALDEMAND[(1+L):(N+L)],
+     main = "NSW: Actual Demand (with PV included)",xlab = "Date (2021)", ylab = "Power",
+    xlim = c(sampleTimes[L],sampleTimes[L+500]))
+lines(sampleTimes[(1+L):(N+L)],(actDemandForecast[1:N])-data$POWER[(L+1):(L+N)],
+      col='green', lwd=2)
+
+```
+
+
